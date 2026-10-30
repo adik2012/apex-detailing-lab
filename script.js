@@ -17,9 +17,9 @@ const PRICING = {
     "srv-6": { name: "Детейлинг моторного отсека диэлектрическим гелем", price: { class1: 6000, class2: 7500, class3: 9000 }, hours: { class1: 3, class2: 3, class3: 4 }, warranty: "Чек-лист изоляции электрики из 14 пунктов" }
   },
   packages: {
-    "pkg-1": { name: "Керамическое зеркало", services: ["srv-1", "srv-2", "srv-5"], price: { class1: 57900, class2: 69500, class3: 84500 } },
-    "pkg-2": { name: "Броня трассы PPF", services: ["srv-3", "srv-5"], price: { class1: 86500, class2: 104500, class3: 127000 } },
-    "pkg-3": { name: "Полная перезагрузка", services: ["srv-1", "srv-2", "srv-4", "srv-6"], price: { class1: 70500, class2: 84500, class3: 104500 } }
+    "pkg-1": { name: "Керамическое зеркало", services: ["srv-1", "srv-2", "srv-5"], price: { class1: 54500, class2: 65000, class3: 80000 } },
+    "pkg-2": { name: "Броня трассы PPF", services: ["srv-3", "srv-5"], price: { class1: 80000, class2: 97000, class3: 118000 } },
+    "pkg-3": { name: "Полная перезагрузка", services: ["srv-1", "srv-2", "srv-4", "srv-6"], price: { class1: 67500, class2: 81000, class3: 100000 } }
   },
   rules: {
     comboDiscount: 0.15,
@@ -55,46 +55,52 @@ const state = {
   selectedDate: null,
   selectedSlot: null,
   ownBlockedDate: null,
-  sending: false
+  sending: false,
+  submitted: false
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 const formatPrice = amount => `${new Intl.NumberFormat("ru-RU").format(amount)} ₽`;
-const dateISO = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const moscowDateParts = date => Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+  timeZone: "Europe/Moscow", year: "numeric", month: "2-digit", day: "2-digit"
+}).formatToParts(date).filter(part => part.type !== "literal").map(part => [part.type, Number(part.value)]));
+const dateISO = date => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 const escapeHTML = value => String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 const slots = ["10:00", "12:00", "14:00", "16:00", "18:00"];
 const busySlots = new Set(["1:12:00", "3:10:00", "5:18:00", "8:14:00"]);
+let modalReturnFocus = null;
+let estimateReturnFocus = null;
 
 function getHours() {
   return state.services.reduce((sum, id) => sum + PRICING.services[id].hours[state.carClass], 0);
 }
 
-function calculate() {
-  const packageData = state.package ? PRICING.packages[state.package] : null;
-  const extras = packageData ? state.services.filter(id => !packageData.services.includes(id)) : state.services;
-  const serviceTotal = state.services.reduce((sum, id) => sum + PRICING.services[id].price[state.carClass], 0);
-  const base = (packageData ? packageData.price[state.carClass] : 0) +
-    extras.reduce((sum, id) => sum + PRICING.services[id].price[state.carClass], 0);
+function computeTotals({ carClass, services, package: pkgId = null, promo = null }) {
+  const packageData = pkgId ? PRICING.packages[pkgId] : null;
+  const extras = packageData ? services.filter(id => !packageData.services.includes(id)) : [...services];
+  const serviceTotal = services.reduce((sum, id) => sum + PRICING.services[id].price[carClass], 0);
+  const base = (packageData ? packageData.price[carClass] : 0) +
+    extras.reduce((sum, id) => sum + PRICING.services[id].price[carClass], 0);
   const comboBase = packageData
-    ? extras.reduce((sum, id) => sum + PRICING.services[id].price[state.carClass], 0)
+    ? extras.reduce((sum, id) => sum + PRICING.services[id].price[carClass], 0)
     : serviceTotal;
-  const combo = (packageData ? extras.length : state.services.length) >= PRICING.rules.comboMinServices
+  const combo = (packageData ? extras.length : services.length) >= PRICING.rules.comboMinServices
     ? Math.round(comboBase * PRICING.rules.comboDiscount)
     : 0;
   const amount = base - combo;
-  const promo = state.promo === PRICING.rules.promo.code
+  const promoDiscount = promo === PRICING.rules.promo.code
     ? Math.round(amount * PRICING.rules.promo.discount)
     : 0;
-  const total = amount - promo;
-  const hours = getHours();
+  const total = amount - promoDiscount;
+  const hours = services.reduce((sum, id) => sum + PRICING.services[id].hours[carClass], 0);
   const packageSavings = packageData
-    ? packageData.services.reduce((sum, id) => sum + PRICING.services[id].price[state.carClass], 0) - packageData.price[state.carClass]
+    ? packageData.services.reduce((sum, id) => sum + PRICING.services[id].price[carClass], 0) - packageData.price[carClass]
     : 0;
   return {
     base,
     combo,
-    promo,
+    promo: promoDiscount,
     total,
     hours,
     gift: total >= PRICING.rules.giftThreshold,
@@ -102,6 +108,59 @@ function calculate() {
     packageSavings,
     serviceTotal
   };
+}
+
+function calculate() {
+  return computeTotals(state);
+}
+
+function getPickupDateTime(date, slot, hours) {
+  const [year, month, day] = date.split("-").map(Number);
+  let dateTime = new Date(Date.UTC(year, month - 1, day, Number(slot.slice(0, 2))));
+  let remainingHours = hours;
+  while (remainingHours > 0) {
+    const availableHours = 20 - dateTime.getUTCHours();
+    const workedHours = Math.min(remainingHours, availableHours);
+    dateTime = new Date(dateTime.getTime() + workedHours * 60 * 60 * 1000);
+    remainingHours -= workedHours;
+    if (remainingHours > 0) {
+      dateTime.setUTCDate(dateTime.getUTCDate() + 1);
+      dateTime.setUTCHours(10, 0, 0, 0);
+    }
+  }
+  return dateTime;
+}
+
+function formatPickup(dateTime) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("ru-RU", {
+    timeZone: "UTC", weekday: "long", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+  }).formatToParts(dateTime).filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+  return `${parts.weekday}, ${parts.day}.${parts.month}, около ${parts.hour}:${parts.minute}`;
+}
+
+function isSlotAvailable(offset, slot, hours) {
+  const startHour = Number(slot.slice(0, 2));
+  const outsideWorkHours = startHour < 10 || startHour > 18;
+  const cannotFinishToday = hours <= PRICING.rules.workdayHours && startHour + hours > 20;
+  if (hours <= 0 || outsideWorkHours || cannotFinishToday) return false;
+
+  let remainingHours = hours;
+  let workdayOffset = offset;
+  let workdayStart = startHour;
+  while (remainingHours > 0) {
+    const workdayEnd = Math.min(20, workdayStart + remainingHours);
+    for (const busySlot of busySlots) {
+      const [busyOffset, busyTime] = busySlot.split(":");
+      const busyHour = Number(busyTime.slice(0, 2));
+      if (Number(busyOffset) === workdayOffset && busyHour >= workdayStart && busyHour < workdayEnd) return false;
+    }
+    remainingHours -= workdayEnd - workdayStart;
+    if (remainingHours > 0) {
+      workdayOffset += 1;
+      workdayStart = 10;
+    }
+  }
+  return true;
 }
 
 function saveBuilder() {
@@ -139,6 +198,10 @@ function renderPackageCards() {
   Object.entries(PRICING.packages).forEach(([id, packageData]) => {
     const price = packageData.price[state.carClass];
     const includedTotal = packageData.services.reduce((sum, serviceId) => sum + PRICING.services[serviceId].price[state.carClass], 0);
+    const manualCombo = packageData.services.length >= PRICING.rules.comboMinServices
+      ? Math.round(includedTotal * PRICING.rules.comboDiscount)
+      : 0;
+    const comboSavings = Math.max(0, includedTotal - manualCombo - price);
     const hours = packageData.services.reduce((sum, serviceId) => sum + PRICING.services[serviceId].hours[state.carClass], 0);
     const includes = $(`[data-package-includes="${id}"]`);
     if (includes) {
@@ -150,7 +213,7 @@ function renderPackageCards() {
     const benefitElement = $(`[data-package-benefit="${id}"]`);
     const hoursElement = $(`[data-package-hours="${id}"]`);
     if (priceElement) priceElement.textContent = formatPrice(price);
-    if (benefitElement) benefitElement.textContent = formatPrice(includedTotal - price);
+    if (benefitElement) benefitElement.textContent = `${formatPrice(includedTotal - price)} / ${formatPrice(comboSavings)}`;
     if (hoursElement) hoursElement.textContent = `~${hours} ч`;
     const card = $(`[data-package-card="${id}"]`);
     const button = $(`[data-select-package="${id}"]`);
@@ -181,9 +244,14 @@ function renderServiceCards() {
 
 function getPackageSuggestion() {
   if (state.package || !state.services.length) return null;
-  return Object.entries(PRICING.packages).find(([, item]) =>
-    item.services.length === state.services.length && item.services.every(id => state.services.includes(id))
-  ) || null;
+  for (const [id, item] of Object.entries(PRICING.packages)) {
+    if (!item.services.every(serviceId => state.services.includes(serviceId))) continue;
+    const manualTotal = computeTotals({ carClass: state.carClass, services: state.services, promo: state.promo }).total;
+    const packageTotal = computeTotals({ carClass: state.carClass, services: state.services, package: id, promo: state.promo }).total;
+    const savings = manualTotal - packageTotal;
+    if (savings >= 500) return [id, item, savings];
+  }
+  return null;
 }
 
 function renderEstimate() {
@@ -230,7 +298,7 @@ function renderEstimate() {
   if (suggestionNode) {
     if (suggestion) {
       const [id, packageData] = suggestion;
-      const benefit = result.serviceTotal - packageData.price[state.carClass];
+      const [, , benefit] = suggestion;
       suggestionNode.hidden = false;
       suggestionNode.innerHTML = `Активируйте пакет «${escapeHTML(packageData.name)}» — выгода еще ${formatPrice(benefit)}<button type="button" data-activate-suggested="${id}">Выбрать этот пакет</button>`;
     } else {
@@ -278,7 +346,10 @@ function renderBookingSummary(node, result = calculate()) {
     result.promo ? `<p>APEX10 −10%: −${formatPrice(result.promo)}</p>` : "",
     result.gift ? `<p class="gift-line">Подарок: ${escapeHTML(PRICING.rules.gift.name)}</p>` : ""
   ].filter(Boolean).join("");
-  node.innerHTML = `<div class="form-summary-content"><p>${escapeHTML(PRICING.classes[state.carClass].label)}</p><p>${selectedLabel}</p>${discountRows}<div class="form-summary-total"><span>Итого</span><strong>${formatPrice(result.total)}</strong></div><p>Длительность: ${result.hours} ч</p></div>`;
+  const pickup = state.selectedDate && state.selectedSlot
+    ? `Выдача: ${formatPickup(getPickupDateTime(state.selectedDate, state.selectedSlot, result.hours))}`
+    : "";
+  node.innerHTML = `<div class="form-summary-content"><p>${escapeHTML(PRICING.classes[state.carClass].label)}</p><p>${selectedLabel}</p>${discountRows}<div class="form-summary-total"><span>Итого</span><strong>${formatPrice(result.total)}</strong></div><p>Длительность: ${result.hours} ч</p>${pickup ? `<p>${escapeHTML(pickup)}</p>` : ""}</div>`;
 }
 
 function renderMasterAdvisory() {
@@ -315,8 +386,17 @@ function applyPromo(input, feedback) {
 }
 
 function choosePackage(packageId) {
-  state.package = packageId;
-  state.services = [...new Set([...state.services, ...PRICING.packages[packageId].services])];
+  const previousPackage = state.package ? PRICING.packages[state.package] : null;
+  const manualServices = previousPackage
+    ? state.services.filter(id => !previousPackage.services.includes(id))
+    : [...state.services];
+  if (state.package === packageId) {
+    state.package = null;
+    state.services = manualServices;
+  } else {
+    state.package = packageId;
+    state.services = [...new Set([...manualServices, ...PRICING.packages[packageId].services])];
+  }
   saveBuilder();
   renderAll();
 }
@@ -343,27 +423,27 @@ function renderAll() {
 function generateDates() {
   const container = $("[data-date-picker]");
   if (!container) return;
-  const today = new Date();
-  today.setHours(12, 0, 0, 0);
+  const todayParts = moscowDateParts(new Date());
+  const today = new Date(Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day));
   const shortDays = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
   const dates = Array.from({ length: 14 }, (_, index) => {
     const date = new Date(today);
-    date.setDate(today.getDate() + index + 1);
+    date.setUTCDate(today.getUTCDate() + index + 1);
     return date;
   });
   container.innerHTML = dates.map((date, index) => {
     const id = dateISO(date);
-    const display = `${shortDays[date.getDay()]}, ${String(date.getDate()).padStart(2, "0")}.${String(date.getMonth() + 1).padStart(2, "0")}`;
+    const display = `${shortDays[date.getUTCDay()]}, ${String(date.getUTCDate()).padStart(2, "0")}.${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
     return `<button type="button" class="date-chip" data-date="${id}" aria-pressed="false"><strong>${index === 0 ? "Завтра" : display}</strong><small>${index === 0 ? display : "Свободная дата"}</small></button>`;
   }).join("");
 }
 
 function getDateOffset(isoDate) {
   if (!isoDate) return -1;
-  const base = new Date();
-  base.setHours(0, 0, 0, 0);
-  const target = new Date(`${isoDate}T00:00:00`);
-  return Math.round((target - base) / 86400000);
+  const todayParts = moscowDateParts(new Date());
+  const today = Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day);
+  const [year, month, day] = isoDate.split("-").map(Number);
+  return Math.round((Date.UTC(year, month - 1, day) - today) / 86400000);
 }
 
 function renderSlots() {
@@ -373,24 +453,20 @@ function renderSlots() {
   if (!container) return;
   const offset = getDateOffset(state.selectedDate);
   const hours = getHours();
-  if (state.selectedSlot) {
-    const selectedStartHour = Number(state.selectedSlot.slice(0, 2));
-    const noLongerFits = hours > 0 && hours <= PRICING.rules.workdayHours && hours > 20 - selectedStartHour;
-    if (busySlots.has(`${offset}:${state.selectedSlot}`) || noLongerFits) {
-      state.selectedSlot = null;
-      state.ownBlockedDate = null;
-    }
+  if (state.selectedSlot && !isSlotAvailable(offset, state.selectedSlot, hours)) {
+    state.selectedSlot = null;
+    state.ownBlockedDate = null;
   }
   const occupancyDays = state.ownBlockedDate === state.selectedDate && hours > 4;
   container.innerHTML = slots.map(slot => {
-    const startHour = Number(slot.slice(0, 2));
-    const tooLong = hours > 0 && hours <= PRICING.rules.workdayHours && hours > 20 - startHour;
+    const available = isSlotAvailable(offset, slot, hours);
     const busy = busySlots.has(`${offset}:${slot}`);
     const occupiedByVisit = occupancyDays && state.selectedSlot !== slot;
-    const disabled = !state.selectedDate || !hours || busy || tooLong || occupiedByVisit;
-    const title = busy ? "На этот слот уже стоит авто" : tooLong ? "Не успеваем в этот день" : occupiedByVisit ? "Занято вашим визитом" : "";
+    const disabled = !state.selectedDate || !available || occupiedByVisit;
+    const title = busy ? "На этот слот уже стоит авто" : occupiedByVisit ? "Занято вашим визитом" : !available ? "Слот недоступен с учетом длительности работ" : "";
     const pressed = state.selectedSlot === slot && !disabled;
-    return `<button class="slot-chip" type="button" data-slot="${slot}" aria-pressed="${pressed}" ${disabled ? "disabled" : ""} ${title ? `title="${title}" aria-label="${slot}: ${title}"` : ""}>${slot}${busy ? "<small>Занято</small>" : tooLong ? "<small>Не успеваем</small>" : occupiedByVisit ? "<small>Ваш визит</small>" : ""}</button>`;
+    const status = busy ? "Занято" : occupiedByVisit ? "Ваш визит" : !available ? "Недоступно" : "";
+    return `<button class="slot-chip" type="button" data-slot="${slot}" aria-pressed="${pressed}" ${disabled ? "disabled" : ""} ${title ? `title="${title}" aria-label="${slot}: ${title}"` : ""}>${slot}${status ? `<small>${status}</small>` : ""}</button>`;
   }).join("");
   if (message) {
     message.classList.remove("is-error");
@@ -403,16 +479,14 @@ function renderSlots() {
           : "Выберите свободное время заезда.";
   }
   if (!estimate) return;
-  if (state.selectedDate && state.selectedSlot && hours > 4) {
-    const days = Math.ceil(hours / PRICING.rules.workdayHours);
-    const pickupDate = new Date(`${state.selectedDate}T12:00:00`);
-    pickupDate.setDate(pickupDate.getDate() + days - 1);
-    const formattedPickup = new Intl.DateTimeFormat("ru-RU", { weekday: "short", day: "numeric", month: "2-digit" }).format(pickupDate);
-    const taxi = hours >= 8
+  if (state.selectedDate && state.selectedSlot && hours > 0) {
+    const pickup = getPickupDateTime(state.selectedDate, state.selectedSlot, hours);
+    const multiday = dateISO(pickup) !== state.selectedDate;
+    const taxi = hours >= 8 || multiday
       ? "<strong>Подменное такси бизнес-класса — за наш счет</strong>: отвезем вас домой после заезда и вернем на выдачу."
-      : "Автомобиль остается в боксе под видеонаблюдением.";
+      : "";
     estimate.hidden = false;
-    estimate.innerHTML = `Длительность работ: <strong>${hours} ч</strong> (около <strong>${days} рабочих дней</strong>). Автомобиль остается в боксе под видеонаблюдением. ${taxi} Ориентировочная выдача: <strong>${escapeHTML(formattedPickup)}, после 18:00</strong>.`;
+    estimate.innerHTML = `Длительность работ: <strong>${hours} ч</strong>. Автомобиль остается в боксе под видеонаблюдением. ${taxi ? `${taxi} ` : ""}Выдача: <strong>${escapeHTML(formatPickup(pickup))}</strong>.`;
     state.ownBlockedDate = state.selectedDate;
   } else {
     estimate.hidden = true;
@@ -429,14 +503,14 @@ function updateSubmitState() {
   const submit = $("[data-submit-button]", form);
   const hasSelection = state.services.length > 0;
   if (submit) {
-    submit.disabled = !consent || !hasSelection || state.sending;
+    submit.disabled = !consent || !hasSelection || state.sending || state.submitted;
     const method = $('input[name="confirmMethod"]:checked', form)?.value || "onsite";
     const label = $("[data-submit-label]", submit);
     if (label) {
       label.textContent = method === "sbp" ? "Показать QR СБП" : method === "messenger" ? "Отправить расчет в Telegram / WhatsApp" : "Подтвердить запись";
     }
   }
-  $$("[data-share]", form).forEach(button => { button.disabled = !consent || !hasSelection || state.sending; });
+  $$("[data-share]", form).forEach(button => { button.disabled = !consent || !hasSelection || state.sending || state.submitted; });
   const hint = $("[data-consent-hint]");
   if (hint) hint.hidden = consent;
 }
@@ -456,16 +530,65 @@ function formatPhone(digits) {
 
 function validateForm(form) {
   const errors = [];
+  const fieldErrors = {};
   const name = $("#customer-name", form).value.trim();
   const carModel = $("#car-model", form).value.trim();
   const phoneDigits = $("#customer-phone", form).value.replace(/\D/g, "");
+  const phone = phoneDigits.length === 11 && phoneDigits.startsWith("7") ? `+${phoneDigits}` : "";
   if (!state.services.length) errors.push("Сначала соберите комплекс из услуг.");
-  if (name.length < 2 || name.length > 40 || !/^[\p{L}\s-]+$/u.test(name)) errors.push("Имя должно содержать от 2 до 40 букв.");
-  if (!carModel || carModel.length > 60) errors.push("Укажите марку и модель автомобиля (до 60 символов).");
-  if (phoneDigits.length !== 11 || !phoneDigits.startsWith("7")) errors.push("Введите полный номер в формате +7 (___) ___-__-__.");
-  if (!state.selectedDate || !state.selectedSlot) errors.push("Выберите дату и свободное время заезда.");
-  if (!$("#personal-consent", form).checked) errors.push("Необходимо согласие на обработку персональных данных.");
-  return { errors, phone: `+${phoneDigits}`, name, carModel };
+  if (name.length < 2 || name.length > 40 || !/^[\p{L}\s-]+$/u.test(name)) {
+    fieldErrors["customer-name"] = "Имя должно содержать от 2 до 40 букв.";
+    errors.push(fieldErrors["customer-name"]);
+  }
+  if (!carModel || carModel.length > 60) {
+    fieldErrors["car-model"] = "Укажите марку и модель автомобиля (до 60 символов).";
+    errors.push(fieldErrors["car-model"]);
+  }
+  if (!/^\+7[3489]\d{9}$/.test(phone)) {
+    fieldErrors["customer-phone"] = "Введите полный номер: +7 и 10 цифр, номер должен начинаться с 3, 4, 8 или 9.";
+    errors.push(fieldErrors["customer-phone"]);
+  }
+  if (!state.selectedDate) {
+    fieldErrors["date-picker"] = "Выберите дату заезда.";
+    errors.push(fieldErrors["date-picker"]);
+  }
+  if (!state.selectedSlot) {
+    fieldErrors["slot-picker"] = "Выберите свободное время заезда.";
+    errors.push(fieldErrors["slot-picker"]);
+  }
+  if (!$("#personal-consent", form).checked) {
+    fieldErrors["personal-consent"] = "Необходимо согласие на обработку персональных данных.";
+    errors.push(fieldErrors["personal-consent"]);
+  }
+  return { errors, fieldErrors, phone, name, carModel };
+}
+
+function updateFieldErrors(form, fieldErrors) {
+  const fields = {
+    "customer-name": $("#customer-name", form),
+    "car-model": $("#car-model", form),
+    "customer-phone": $("#customer-phone", form),
+    "personal-consent": $("#personal-consent", form),
+    "date-picker": $("[data-date-picker]", form),
+    "slot-picker": $("[data-slot-picker]", form)
+  };
+  Object.entries(fields).forEach(([id, field]) => {
+    if (!field) return;
+    const error = $(`#${id}-error`, form);
+    const describedBy = (field.getAttribute("aria-describedby") || "").split(/\s+/).filter(value => value && value !== `${id}-error`);
+    if (fieldErrors[id]) {
+      field.setAttribute("aria-invalid", "true");
+      describedBy.push(`${id}-error`);
+    } else {
+      field.removeAttribute("aria-invalid");
+    }
+    if (describedBy.length) field.setAttribute("aria-describedby", describedBy.join(" "));
+    else field.removeAttribute("aria-describedby");
+    if (error) {
+      error.textContent = fieldErrors[id] || "";
+      error.hidden = !fieldErrors[id];
+    }
+  });
 }
 
 function orderPayload(form, values) {
@@ -487,7 +610,7 @@ function orderPayload(form, values) {
   };
 }
 
-function showSuccess(orderId, payload, isDemo) {
+function showSuccess(orderId, payload, isDemo, serverPickup = null) {
   const panel = $("[data-booking-success]");
   const title = $("[data-success-title]");
   const summary = $("[data-success-summary]");
@@ -498,7 +621,9 @@ function showSuccess(orderId, payload, isDemo) {
   if (summary) {
     const master = MASTERS[payload.master];
     const masterText = master ? `${master.name} · ${master.box}` : "Любой свободный мастер";
-    summary.innerHTML = `<div class="form-summary-content"><p>${escapeHTML(PRICING.classes[payload.carClass].label)}</p><p>${payload.services.map(id => escapeHTML(PACKAGE_COMPONENT_NAMES[id])).join(", ")}</p><p>${escapeHTML(payload.date)} · ${escapeHTML(payload.slot)} · ${escapeHTML(masterText)}</p><div class="form-summary-total"><span>Итого</span><strong>${formatPrice(calculate().total)}</strong></div></div>${isDemo ? '<p class="demo-note">Статичный хостинг портфолио: заявка не отправляется на сервер.</p>' : ""}`;
+    const totals = computeTotals({ carClass: payload.carClass, services: payload.services, package: payload.package, promo: payload.promo });
+    const pickup = serverPickup || formatPickup(getPickupDateTime(payload.date, payload.slot, totals.hours));
+    summary.innerHTML = `<div class="form-summary-content"><p>${escapeHTML(PRICING.classes[payload.carClass].label)}</p><p>${payload.services.map(id => escapeHTML(PACKAGE_COMPONENT_NAMES[id])).join(", ")}</p><p>${escapeHTML(payload.date)} · ${escapeHTML(payload.slot)} · ${escapeHTML(masterText)}</p><p>Выдача: ${escapeHTML(pickup)}</p><div class="form-summary-total"><span>Итого</span><strong>${formatPrice(totals.total)}</strong></div></div>${isDemo ? '<p class="demo-note">Статичный хостинг портфолио: заявка не отправляется на сервер.</p>' : ""}`;
   }
   panel.hidden = false;
   panel.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -509,6 +634,7 @@ async function submitBooking(event) {
   const form = event.currentTarget;
   const errorBox = $("[data-form-errors]", form);
   const validation = validateForm(form);
+  updateFieldErrors(form, validation.fieldErrors);
   errorBox.textContent = validation.errors.join(" ");
   if (validation.errors.length) return;
   const payload = orderPayload(form, validation);
@@ -520,24 +646,63 @@ async function submitBooking(event) {
     if (IS_DEMO_HOST) {
       const demoId = `APEX-DEMO-${String(Math.floor(1000 + Math.random() * 9000))}`;
       showSuccess(demoId, payload, true);
+      state.submitted = true;
+      updateSubmitState();
+      $$("input, select, textarea, button", form).forEach(field => { field.disabled = true; });
       if (payload.confirmMethod === "sbp") openModal("sbp");
       return;
     }
-    const response = await fetch("send.php", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const responseData = await response.json();
-    if (!response.ok || responseData.ok !== true) {
-      const message = responseData?.error?.message || BOOKING_API_ERROR;
-      throw new Error(message);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+    let response;
+    let responseText;
+    try {
+      response = await fetch("send.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      responseText = await response.text();
+    } finally {
+      window.clearTimeout(timeoutId);
     }
-    showSuccess(responseData.orderId, payload, false);
+    let responseData = null;
+    try { responseData = JSON.parse(responseText); } catch { responseData = null; }
+    if (!response.ok || !responseData || responseData.ok !== true || typeof responseData.orderId !== "string") {
+      const errorCode = responseData?.error?.code;
+      const messages = {
+        unknown_class: "Выберите класс автомобиля из списка.",
+        unknown_service: "В составе комплекса найдена неизвестная услуга.",
+        bad_promo: "Промокод не найден. Проверьте написание.",
+        no_consent: "Необходимо согласие на обработку персональных данных.",
+        slot_unavailable: "Выбранный слот уже занят. Выберите другую дату или время.",
+        rate_limited: "Слишком много заявок. Попробуйте позже или позвоните: +7 (900) 000-00-00.",
+        validation: "Проверьте данные заявки, выбранную дату и время.",
+        server: "Не удалось сохранить заявку. Позвоните нам: +7 (900) 000-00-00."
+      };
+      const statusMessages = {
+        400: "Не удалось прочитать заявку. Проверьте данные и повторите отправку.",
+        413: "Заявка слишком большая. Проверьте данные и повторите отправку.",
+        415: "Сервер отклонил формат заявки. Позвоните нам: +7 (900) 000-00-00.",
+        422: "Проверьте данные заявки и выберите доступный слот.",
+        429: "Слишком много заявок. Попробуйте позже.",
+        500: "Не удалось сохранить заявку. Позвоните нам: +7 (900) 000-00-00."
+      };
+      throw new Error(messages[errorCode] || statusMessages[response.status] || BOOKING_API_ERROR);
+    }
+    showSuccess(responseData.orderId, payload, false, responseData.summary?.pickup);
+    state.submitted = true;
+    updateSubmitState();
+    $$("input, select, textarea, button", form).forEach(field => { field.disabled = true; });
     if (payload.confirmMethod === "sbp") openModal("sbp");
   } catch (error) {
     console.error("Не удалось отправить заявку.", error);
-    errorBox.textContent = error.message && error.message !== "Failed to fetch" ? error.message : BOOKING_API_ERROR;
+    errorBox.textContent = error.name === "AbortError"
+      ? "Сервер не ответил за 15 секунд. Проверьте соединение и повторите отправку."
+      : error.message === BOOKING_API_ERROR || error.message.startsWith("Выберите") || error.message.startsWith("В составе") || error.message.startsWith("Промокод") || error.message.startsWith("Необходимо") || error.message.startsWith("Слишком") || error.message.startsWith("Проверьте") || error.message.startsWith("Не удалось")
+        ? error.message
+        : BOOKING_API_ERROR;
   } finally {
     state.sending = false;
     button.classList.remove("is-loading");
@@ -558,6 +723,7 @@ function showToast(message) {
 function openModal(name) {
   const modal = $(`[data-modal="${name}"]`);
   if (!modal) return;
+  modalReturnFocus = document.activeElement;
   modal.hidden = false;
   $("body").classList.add("modal-open");
   $("[data-close-modal]", modal)?.focus();
@@ -566,6 +732,54 @@ function openModal(name) {
 function closeModal(modal) {
   if (modal) modal.hidden = true;
   if (!$("[data-modal]:not([hidden])")) $("body").classList.remove("modal-open");
+  if (modalReturnFocus?.isConnected && !modalReturnFocus.disabled) modalReturnFocus.focus();
+  else $("[data-success-title]")?.focus();
+  modalReturnFocus = null;
+}
+
+function openEstimateSheet(trigger) {
+  const panel = $(".estimate-panel");
+  if (!panel) return;
+  estimateReturnFocus = trigger;
+  panel.classList.add("is-open");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-hidden", "false");
+  $$("[data-open-estimate], [data-scroll-estimate]").forEach(button => button.setAttribute("aria-expanded", "true"));
+  $("body").classList.add("sheet-open");
+  $(".estimate-close", panel)?.focus();
+}
+
+function closeEstimateSheet() {
+  const panel = $(".estimate-panel");
+  if (!panel?.classList.contains("is-open")) return;
+  panel.classList.remove("is-open");
+  panel.setAttribute("aria-modal", "false");
+  panel.setAttribute("aria-hidden", "true");
+  $$("[data-open-estimate], [data-scroll-estimate]").forEach(button => button.setAttribute("aria-expanded", "false"));
+  $("body").classList.remove("sheet-open");
+  if (estimateReturnFocus?.isConnected) estimateReturnFocus.focus();
+  estimateReturnFocus = null;
+}
+
+function trapFocus(container, event) {
+  if (event.key !== "Tab") return;
+  const focusable = $$('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])', container)
+    .filter(element => !element.hidden && element.getClientRects().length > 0);
+  if (!focusable.length) {
+    event.preventDefault();
+    container.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !container.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !container.contains(document.activeElement))) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function closeMenu() {
@@ -697,13 +911,11 @@ function initEvents() {
     if (target.closest("[data-apply-booking-promo]")) applyPromo($("#booking-promo"), $("[data-booking-promo-feedback]"));
     if (target.closest("[data-open-estimate]") || target.closest("[data-scroll-estimate]")) {
       if (window.matchMedia("(max-width: 800px)").matches) {
-        $(".estimate-panel").classList.add("is-open");
-        $("body").classList.add("sheet-open");
+        openEstimateSheet(target.closest("[data-open-estimate], [data-scroll-estimate]"));
       } else $("#estimate").scrollIntoView({ behavior: "smooth", block: "center" });
     }
     if (target.closest("[data-close-estimate]")) {
-      $(".estimate-panel").classList.remove("is-open");
-      $("body").classList.remove("sheet-open");
+      closeEstimateSheet();
     }
     if (target.closest("[data-open-privacy]")) openModal("privacy");
     if (target.closest("[data-close-modal]")) closeModal(target.closest("[data-modal]"));
@@ -740,6 +952,10 @@ function initEvents() {
       form.reset();
       form.hidden = false;
       $("[data-booking-success]").hidden = true;
+      state.submitted = false;
+      $$("input, select, textarea, button", form).forEach(field => { field.disabled = false; });
+      updateFieldErrors(form, {});
+      $("[data-form-errors]", form).textContent = "";
       state.selectedDate = null;
       state.selectedSlot = null;
       state.ownBlockedDate = null;
@@ -792,11 +1008,26 @@ function initEvents() {
     $("body").classList.toggle("menu-open", !isOpen);
   });
   document.addEventListener("keydown", event => {
+    const modal = $("[data-modal]:not([hidden])");
+    if (modal) {
+      if (event.key === "Escape") {
+        closeModal(modal);
+        return;
+      }
+      trapFocus(modal, event);
+      return;
+    }
+    const estimate = $(".estimate-panel.is-open");
+    if (estimate) {
+      if (event.key === "Escape") {
+        closeEstimateSheet();
+        return;
+      }
+      trapFocus(estimate, event);
+      return;
+    }
     if (event.key === "Escape") {
-      $$("[data-modal]:not([hidden])").forEach(closeModal);
       closeMenu();
-      $(".estimate-panel")?.classList.remove("is-open");
-      $("body").classList.remove("sheet-open");
     }
   });
   $$(".faq-item").forEach(item => item.addEventListener("toggle", () => {
@@ -804,35 +1035,15 @@ function initEvents() {
   }));
 }
 
-function runPricingChecks() {
-  const original = { ...state };
-  const scenarios = [
-    { name: "A", carClass: "class2", services: ["srv-2"], package: null, promo: null, expected: 45000 },
-    { name: "B", carClass: "class1", services: ["srv-5", "srv-6"], package: null, promo: "APEX10", expected: 10327 },
-    { name: "C", carClass: "class1", services: ["srv-1", "srv-2", "srv-5"], package: "pkg-1", promo: "APEX10", expected: 52110 },
-    { name: "D", carClass: "class1", services: ["srv-1", "srv-2", "srv-5", "srv-6"], package: "pkg-1", promo: "APEX10", expected: 57510 },
-    { name: "E", carClass: "class1", services: ["srv-1", "srv-2", "srv-5"], package: null, promo: null, expected: 59075 }
-  ];
-  scenarios.forEach(test => {
-    state.carClass = test.carClass;
-    state.services = test.services;
-    state.package = test.package;
-    state.promo = test.promo;
-    const actual = calculate().total;
-    console.assert(actual === test.expected, `Pricing scenario ${test.name}: expected ${test.expected}, received ${actual}`);
-  });
-  Object.assign(state, original);
-}
-
 function init() {
   restoreBuilder();
+  if (window.matchMedia("(max-width: 800px)").matches) $(".estimate-panel")?.setAttribute("aria-hidden", "true");
   generateDates();
   initComparison();
   initReveals();
   initScrollSpy();
   initEvents();
   renderAll();
-  runPricingChecks();
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init, { once: true });

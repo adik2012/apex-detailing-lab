@@ -2,9 +2,11 @@
 declare(strict_types=1);
 
 ini_set('display_errors', '0');
+date_default_timezone_set('Europe/Moscow');
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
 header('Cache-Control: no-store');
+const LOG_FULL_PHONE = true;
 
 $PRICING = [
     'classes' => [
@@ -54,17 +56,17 @@ $PRICING = [
         'pkg-1' => [
             'name' => 'Керамическое зеркало',
             'services' => ['srv-1', 'srv-2', 'srv-5'],
-            'price' => ['class1' => 57900, 'class2' => 69500, 'class3' => 84500],
+            'price' => ['class1' => 54500, 'class2' => 65000, 'class3' => 80000],
         ],
         'pkg-2' => [
             'name' => 'Броня трассы PPF',
             'services' => ['srv-3', 'srv-5'],
-            'price' => ['class1' => 86500, 'class2' => 104500, 'class3' => 127000],
+            'price' => ['class1' => 80000, 'class2' => 97000, 'class3' => 118000],
         ],
         'pkg-3' => [
             'name' => 'Полная перезагрузка',
             'services' => ['srv-1', 'srv-2', 'srv-4', 'srv-6'],
-            'price' => ['class1' => 70500, 'class2' => 84500, 'class3' => 104500],
+            'price' => ['class1' => 67500, 'class2' => 81000, 'class3' => 100000],
         ],
     ],
     'rules' => [
@@ -96,21 +98,39 @@ function cleanString(mixed $value): string
     }
 
     $value = trim(strip_tags($value));
-    return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $cleaned = preg_replace('/[\x00-\x1F\x7F]/u', ' ', $value);
+    if ($cleaned === null) {
+        return '';
+    }
+
+    return trim($cleaned);
 }
 
 function characterLength(string $value): int
 {
+    if (function_exists('mb_strlen')) {
+        return mb_strlen($value, 'UTF-8');
+    }
+
     $matches = [];
-    return preg_match_all('/./us', $value, $matches) === false ? PHP_INT_MAX : count($matches[0]);
+    $length = preg_match_all('/./us', $value, $matches);
+    if ($length === false) {
+        throw new RuntimeException('Не удалось проверить длину текстового поля.');
+    }
+
+    return $length;
 }
 
-function csvSafe(?string $value): string
+function csvSafe(?string $value, bool $isValidatedPhone = false): string
 {
-    $value = str_replace(["\r", "\n", "\t"], ' ', (string) $value);
-    if ($value !== '' && in_array($value[0], ['=', '+', '-', '@'], true)) {
+    $value = (string) $value;
+    if ($isValidatedPhone && preg_match('/^\+7[3489]\d{9}$/', $value) === 1) {
+        return $value;
+    }
+    if ($value !== '' && preg_match('/^[=+\-@\t\r]/', $value) === 1) {
         $value = "'" . $value;
     }
+
     return $value;
 }
 
@@ -177,16 +197,61 @@ function recalc(string $class, array $serviceIds, ?string $packageId, ?string $p
         ],
         'finalTotal' => $final,
         'durationHours' => $durationHours,
-        'pickupEstimate' => $durationHours > $rules['workdayHours']
-            ? (string) (int) ceil($durationHours / $rules['workdayHours']) . ' рабочих дней, выдача после 18:00'
-            : 'В день заезда после завершения работ',
     ];
 }
 
-function checkRateLimit(string $directory): void
+function packageMasterServices(): array
 {
-    $filePath = $directory . DIRECTORY_SEPARATOR . '.ratelimit';
-    $file = @fopen($filePath, 'c+');
+    return [
+        'master-1' => ['srv-1', 'srv-2', 'srv-5'],
+        'master-2' => ['srv-3'],
+        'master-3' => ['srv-2', 'srv-5'],
+        'master-4' => ['srv-4', 'srv-6'],
+    ];
+}
+
+function generateOrderId(): string
+{
+    $characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    $suffix = '';
+    for ($index = 0; $index < 6; $index++) {
+        $suffix .= $characters[random_int(0, strlen($characters) - 1)];
+    }
+
+    return 'APEX-' . date('Ymd') . '-' . $suffix;
+}
+
+function getRateLimitSalt(string $directory): string
+{
+    $path = $directory . DIRECTORY_SEPARATOR . '.salt';
+    if (!is_file($path)) {
+        $file = @fopen($path, 'x');
+        if ($file !== false) {
+            $salt = random_bytes(32);
+            if (fwrite($file, $salt) !== strlen($salt) || !fflush($file)) {
+                fclose($file);
+                throw new RuntimeException('Не удалось создать соль ограничения частоты запросов.');
+            }
+            fclose($file);
+            @chmod($path, 0600);
+        } elseif (!is_file($path)) {
+            throw new RuntimeException('Не удалось создать соль ограничения частоты запросов.');
+        }
+    }
+
+    $salt = file_get_contents($path);
+    if ($salt === false || strlen($salt) !== 32) {
+        throw new RuntimeException('Файл соли ограничения частоты запросов поврежден.');
+    }
+
+    return $salt;
+}
+
+function beginRateLimit(string $directory, string $ip): array
+{
+    $salt = getRateLimitSalt($directory);
+    $path = $directory . DIRECTORY_SEPARATOR . '.ratelimit';
+    $file = @fopen($path, 'c+');
     if ($file === false) {
         throw new RuntimeException('Не удалось открыть хранилище ограничения частоты запросов.');
     }
@@ -195,14 +260,14 @@ function checkRateLimit(string $directory): void
         throw new RuntimeException('Не удалось заблокировать хранилище ограничения частоты запросов.');
     }
 
+    @chmod($path, 0600);
     $contents = stream_get_contents($file);
     $entries = json_decode($contents === false ? '' : $contents, true);
     if (!is_array($entries)) {
         $entries = [];
     }
     $now = time();
-    $clientIp = (string) ($_SERVER['REMOTE_ADDR'] ?? 'unknown');
-    $key = hash('sha256', $clientIp);
+    $key = hash_hmac('sha256', $ip, $salt);
     $timestamps = array_values(array_filter(
         $entries[$key] ?? [],
         static fn ($timestamp): bool => is_int($timestamp) && $timestamp > $now - 3600
@@ -214,23 +279,95 @@ function checkRateLimit(string $directory): void
         failRequest(429, 'rate_limited', 'Слишком много заявок. Попробуйте позже или позвоните: +7 (900) 000-00-00');
     }
 
-    $timestamps[] = $now;
-    $entries[$key] = $timestamps;
+    return ['file' => $file, 'entries' => $entries, 'key' => $key, 'timestamps' => $timestamps];
+}
+
+function commitRateLimit(array $reservation): void
+{
+    $file = $reservation['file'];
+    $entries = $reservation['entries'];
+    $entries[$reservation['key']] = [...$reservation['timestamps'], time()];
     foreach ($entries as $entryKey => $entryTimes) {
         if (!is_array($entryTimes) || count($entryTimes) === 0) {
             unset($entries[$entryKey]);
         }
     }
     rewind($file);
-    if (!ftruncate($file, 0) || fwrite($file, (string) json_encode($entries)) === false) {
+    if (!ftruncate($file, 0) || fwrite($file, (string) json_encode($entries)) === false || !fflush($file)) {
         flock($file, LOCK_UN);
         fclose($file);
         throw new RuntimeException('Не удалось обновить хранилище ограничения частоты запросов.');
     }
-    fflush($file);
     flock($file, LOCK_UN);
     fclose($file);
-    @chmod($filePath, 0600);
+}
+
+function releaseRateLimit(?array $reservation): void
+{
+    if ($reservation !== null && isset($reservation['file']) && is_resource($reservation['file'])) {
+        flock($reservation['file'], LOCK_UN);
+        fclose($reservation['file']);
+    }
+}
+
+function pickupDateTime(string $date, string $slot, int $hours): DateTimeImmutable
+{
+    $current = new DateTimeImmutable($date . ' ' . $slot);
+    $remainingHours = $hours;
+    while ($remainingHours > 0) {
+        $availableHours = 20 - (int) $current->format('G');
+        $workedHours = min($remainingHours, $availableHours);
+        $current = $current->modify('+' . $workedHours . ' hours');
+        $remainingHours -= $workedHours;
+        if ($remainingHours > 0) {
+            $current = $current->modify('tomorrow')->setTime(10, 0);
+        }
+    }
+
+    return $current;
+}
+
+function formatPickup(DateTimeImmutable $pickup): string
+{
+    $weekdays = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+
+    return $weekdays[(int) $pickup->format('w')] . ', ' . $pickup->format('d.m') . ', около ' . $pickup->format('H:i');
+}
+
+function slotIsAvailable(string $date, string $slot, int $hours): bool
+{
+    $today = new DateTimeImmutable('today');
+    $selectedDate = new DateTimeImmutable($date);
+    $offset = (int) $today->diff($selectedDate)->format('%r%a');
+    $busySlots = ['1:12:00', '3:10:00', '5:18:00', '8:14:00'];
+    $startHour = (int) substr($slot, 0, 2);
+    if ($hours <= 0 || $startHour < 10 || $startHour > 18) {
+        return false;
+    }
+    if ($hours <= 10 && $startHour + $hours > 20) {
+        return false;
+    }
+
+    $remainingHours = $hours;
+    $workdayOffset = $offset;
+    $workdayStart = $startHour;
+    while ($remainingHours > 0) {
+        $workdayEnd = min(20, $workdayStart + $remainingHours);
+        foreach ($busySlots as $busySlot) {
+            [$busyOffset, $busyTime] = explode(':', $busySlot, 2);
+            $busyHour = (int) substr($busyTime, 0, 2);
+            if ((int) $busyOffset === $workdayOffset && $busyHour >= $workdayStart && $busyHour < $workdayEnd) {
+                return false;
+            }
+        }
+        $remainingHours -= $workdayEnd - $workdayStart;
+        if ($remainingHours > 0) {
+            $workdayOffset++;
+            $workdayStart = 10;
+        }
+    }
+
+    return true;
 }
 
 function saveOrder(string $directory, array $row): void
@@ -253,17 +390,23 @@ function saveOrder(string $directory, array $row): void
         }
         $header = [
             'order_id', 'datetime', 'name', 'phone', 'car_class', 'car_model', 'services',
-            'package', 'promo', 'master', 'date', 'slot', 'confirm_method', 'base_total',
+            'package', 'promo', 'master', 'master_note', 'date', 'slot', 'confirm_method', 'base_total',
             'combo_discount', 'promo_discount', 'gift', 'final_total', 'duration_hours',
         ];
-        fputcsv($file, array_map('csvSafe', $header), ';', '"', '\\');
+        if (fputcsv($file, $header, ';', '"', '\\') === false) {
+            flock($file, LOCK_UN);
+            fclose($file);
+            throw new RuntimeException('Не удалось записать заголовок журнала заявок.');
+        }
     }
 
     fseek($file, 0, SEEK_END);
-    $safeRow = array_map(
-        static fn ($value): string => csvSafe(is_scalar($value) ? (string) $value : json_encode($value, JSON_UNESCAPED_UNICODE)),
-        $row
-    );
+    $safeRow = [];
+    foreach ($row as $key => $value) {
+        $isPhone = $key === 'phone' && LOG_FULL_PHONE;
+        $encoded = is_scalar($value) ? (string) $value : json_encode($value, JSON_UNESCAPED_UNICODE);
+        $safeRow[] = csvSafe($encoded === false ? '' : $encoded, $isPhone);
+    }
     if (fputcsv($file, $safeRow, ';', '"', '\\') === false || !fflush($file)) {
         flock($file, LOCK_UN);
         fclose($file);
@@ -279,6 +422,10 @@ try {
     if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
         header('Allow: POST');
         failRequest(405, 'validation', 'Метод запроса не поддерживается.');
+    }
+    $contentType = strtolower(trim(explode(';', (string) ($_SERVER['CONTENT_TYPE'] ?? ''))[0]));
+    if ($contentType !== 'application/json') {
+        failRequest(415, 'validation', 'Сервер принимает заявку только в формате JSON.');
     }
 
     $contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
@@ -298,8 +445,9 @@ try {
         failRequest(422, 'validation', 'Проверьте данные заявки и повторите отправку.');
     }
     if (cleanString($website) !== '') {
-        respond(200, ['ok' => true]);
+        respond(200, ['ok' => true, 'orderId' => generateOrderId()]);
     }
+
     if (($input['action'] ?? null) !== 'create_order') {
         failRequest(422, 'validation', 'Неизвестный тип заявки.');
     }
@@ -370,8 +518,8 @@ try {
 
     $phoneValue = $input['phone'] ?? null;
     $phone = is_string($phoneValue) ? trim($phoneValue) : '';
-    if (preg_match('/^\+7\d{10}$/', $phone) !== 1) {
-        failRequest(422, 'validation', 'Введите полный номер в формате +7 (___) ___-__-__.');
+    if (preg_match('/^\+7[3489]\d{9}$/', $phone) !== 1) {
+        failRequest(422, 'validation', 'Введите полный номер в формате +7 и 10 цифр, начинающихся с 3, 4, 8 или 9.');
     }
     $confirmMethod = is_string($input['confirmMethod'] ?? null) ? $input['confirmMethod'] : '';
     if (!in_array($confirmMethod, ['onsite', 'sbp', 'messenger'], true)) {
@@ -382,36 +530,48 @@ try {
     }
 
     $summary = recalc($class, $serviceIds, $packageId, $promo);
+    if (!slotIsAvailable($date, $slot, $summary['durationHours'])) {
+        failRequest(422, 'slot_unavailable', 'Выбранный слот уже занят. Выберите другую дату или время.');
+    }
+    $pickup = pickupDateTime($date, $slot, $summary['durationHours']);
+    $summary['pickup'] = formatPickup($pickup);
+
     $directory = __DIR__ . DIRECTORY_SEPARATOR . 'data';
     if (!is_dir($directory) && !mkdir($directory, 0750, true) && !is_dir($directory)) {
         throw new RuntimeException('Не удалось создать каталог журнала заявок.');
     }
-    checkRateLimit($directory);
-
-    $orderId = 'APEX-' . date('Y') . '-' . str_pad((string) random_int(0, 9999), 4, '0', STR_PAD_LEFT);
+    $rateLimitReservation = beginRateLimit($directory, (string) ($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+    $orderId = generateOrderId();
     $masterLabel = $master === 'master-any' ? 'Любой свободный мастер' : $master;
-    $loggedPhone = substr($phone, 0, 2) . '***' . substr($phone, -3);
+    $masterServices = packageMasterServices();
+    $masterNote = isset($masterServices[$master]) && array_diff($serviceIds, $masterServices[$master]) !== []
+        ? 'profile_mismatch'
+        : '';
+    $loggedPhone = LOG_FULL_PHONE ? $phone : substr($phone, 0, 2) . '***' . substr($phone, -3);
     saveOrder($directory, [
-        $orderId,
-        date('c'),
-        $name,
-        $loggedPhone,
-        $class,
-        $carModel,
-        implode(', ', $serviceIds),
-        $packageId ?? '',
-        $promo ?? '',
-        $masterLabel,
-        $date,
-        $slot,
-        $confirmMethod,
-        $summary['baseTotal'],
-        $summary['comboDiscount'],
-        $summary['promoDiscount'],
-        $summary['gift']['active'] ? $summary['gift']['name'] : '',
-        $summary['finalTotal'],
-        $summary['durationHours'],
+        'order_id' => $orderId,
+        'datetime' => date('c'),
+        'name' => $name,
+        'phone' => $loggedPhone,
+        'car_class' => $class,
+        'car_model' => $carModel,
+        'services' => implode(', ', $serviceIds),
+        'package' => $packageId ?? '',
+        'promo' => $promo ?? '',
+        'master' => $masterLabel,
+        'master_note' => $masterNote,
+        'date' => $date,
+        'slot' => $slot,
+        'confirm_method' => $confirmMethod,
+        'base_total' => $summary['baseTotal'],
+        'combo_discount' => $summary['comboDiscount'],
+        'promo_discount' => $summary['promoDiscount'],
+        'gift' => $summary['gift']['active'] ? $summary['gift']['name'] : '',
+        'final_total' => $summary['finalTotal'],
+        'duration_hours' => $summary['durationHours'],
     ]);
+    commitRateLimit($rateLimitReservation);
+    $rateLimitReservation = null;
 
     respond(200, [
         'ok' => true,
@@ -419,6 +579,9 @@ try {
         'summary' => array_merge(['carClass' => $class, 'package' => $packageId], $summary),
     ]);
 } catch (Throwable $error) {
+    if (isset($rateLimitReservation)) {
+        releaseRateLimit($rateLimitReservation);
+    }
     error_log('APEX order processing failed: ' . $error->getMessage());
     failRequest(500, 'server', 'Не удалось сохранить заявку. Позвоните нам: +7 (900) 000-00-00.');
 }

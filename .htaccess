@@ -1,6 +1,6 @@
 Options -Indexes
 <IfModule mod_authz_core.c>
-  <FilesMatch "(?i)(\.md$|\.csv$|\.ratelimit$)">
+  <FilesMatch "(?i)(\.md$|\.csv$|\.ratelimit$|\.salt$)">
     Require all denied
   </FilesMatch>
   <FilesMatch "^\.git">
@@ -8,7 +8,7 @@ Options -Indexes
   </FilesMatch>
 </IfModule>
 <IfModule !mod_authz_core.c>
-  <FilesMatch "(?i)(\.md$|\.csv$|\.ratelimit$|^\.git)">
+  <FilesMatch "(?i)(\.md$|\.csv$|\.ratelimit$|\.salt$|^\.git)">
     Order allow,deny
     Deny from all
   </FilesMatch>
