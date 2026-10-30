@@ -1,0 +1,8 @@
+# Runtime order and rate-limit data
+/data/orders.csv
+/data/.ratelimit
+
+# Local editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/

@@ -1,0 +1,19 @@
+Options -Indexes
+<IfModule mod_authz_core.c>
+  <FilesMatch "(?i)(\.md$|\.csv$|\.ratelimit$)">
+    Require all denied
+  </FilesMatch>
+  <FilesMatch "^\.git">
+    Require all denied
+  </FilesMatch>
+</IfModule>
+<IfModule !mod_authz_core.c>
+  <FilesMatch "(?i)(\.md$|\.csv$|\.ratelimit$|^\.git)">
+    Order allow,deny
+    Deny from all
+  </FilesMatch>
+</IfModule>
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule (^|/)\.git(/|$) - [F,L]
+</IfModule>
